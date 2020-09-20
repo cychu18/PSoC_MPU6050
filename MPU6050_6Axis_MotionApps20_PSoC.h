@@ -333,5 +333,209 @@ const unsigned char dmpUpdates[MPU6050_DMP_UPDATES_SIZE] PROGMEM = {
     0x01,   0x62,   0x02,   0x00, 0x00,
     0x00,   0x60,   0x04,   0x00, 0x40, 0x00, 0x00
 };
+// dmp functions
+uint8_t MPU6050DMPSetUp(uint8_t devAddr){
+    writeBit(devAddr, MPU6050_RA_PWR_MGMT_1, MPU6050_PWR1_DEVICE_RESET_BIT, 1); //reset();
+    CyDelay(30);
+    writeBit(devAddr, MPU6050_RA_PWR_MGMT_1, MPU6050_PWR1_SLEEP_BIT, 0);
+//    uint8_t bank =0x10 & 0x1F;
+//    bank |= 0x20;
+//    bank |= 0x40;
+//    writeByte(0x68, MPU6050_RA_BANK_SEL, bank);
+    
+    uint8_t bank = 0x00 & 0x1F;
+    writeByte(devAddr, MPU6050_RA_BANK_SEL, bank);//Resetting memory bank selection to 0
+    
+    int8_t xgOffsetTC = getXGyroOffsetTC(devAddr);
+    int8_t ygOffsetTC = getYGyroOffsetTC(devAddr);
+    int8_t zgOffsetTC = getZGyroOffsetTC(devAddr);
+    
+    writeByte(devAddr, MPU6050_RA_I2C_SLV0_ADDR + 0*3, 0x7F);//Setting slave 0 address to 0x7F
+    writeBit(devAddr, MPU6050_RA_USER_CTRL, MPU6050_USERCTRL_I2C_MST_EN_BIT, 0);//Disabling I2C Master mode.
+    writeByte(devAddr, MPU6050_RA_I2C_SLV0_ADDR + 0*3, 0x68);//setting slave 0 address to 0x68 (self)
+    writeBit(devAddr, MPU6050_RA_USER_CTRL, MPU6050_USERCTRL_I2C_MST_RESET_BIT, 1);//Resetting I2C Master control..
+    CyDelay(20);
+    
+    //Writing DMP code to MPU memory banks 
+    if (writeProgMemoryBlock(devAddr, dmpMemory, MPU6050_DMP_CODE_SIZE,0,0,1)==1){
+         if (writeProgDMPConfigurationSet(devAddr, dmpConfig, MPU6050_DMP_CONFIG_SIZE)==1) {
+            writeBits(devAddr, MPU6050_RA_PWR_MGMT_1, MPU6050_PWR1_CLKSEL_BIT, MPU6050_PWR1_CLKSEL_LENGTH, MPU6050_CLOCK_PLL_ZGYRO);//Setting clock source to Z Gyro.
+            writeByte(devAddr, MPU6050_RA_INT_ENABLE, 1<<MPU6050_INTERRUPT_FIFO_OFLOW_BIT|1<<MPU6050_INTERRUPT_DMP_INT_BIT);//Setting DMP and FIFO_OFLOW interrupts enabled
+            writeByte(devAddr, MPU6050_RA_SMPLRT_DIV, 4); //Setting sample rate to 200Hz
+            writeBits(devAddr, MPU6050_RA_CONFIG, MPU6050_CFG_EXT_SYNC_SET_BIT, MPU6050_CFG_EXT_SYNC_SET_LENGTH, MPU6050_EXT_SYNC_TEMP_OUT_L);//Setting external frame sync to TEMP_OUT_L[0]
+            writeBits(devAddr, MPU6050_RA_CONFIG, MPU6050_CFG_DLPF_CFG_BIT, MPU6050_CFG_DLPF_CFG_LENGTH, MPU6050_DLPF_BW_42);//Setting DLPF bandwidth to 42Hz.
+            writeBits(devAddr, MPU6050_RA_GYRO_CONFIG, MPU6050_GCONFIG_FS_SEL_BIT, MPU6050_GCONFIG_FS_SEL_LENGTH, MPU6050_GYRO_FS_2000);//Setting gyro sensitivity to +/- 2000 deg/sec
+            
+            writeByte(devAddr, MPU6050_RA_DMP_CFG_1, 0x03);//write start address MSB into register
+            writeByte(devAddr, MPU6050_RA_DMP_CFG_2, 0x00);//write start address LSB into register
+            writeBit(devAddr, MPU6050_RA_XG_OFFS_TC, MPU6050_TC_OTP_BNK_VLD_BIT, 0);// Clearing OTP Bank flag
+            //Setting X/Y/Z gyro offset TCs to previous values..
+            writeBits(devAddr, MPU6050_RA_XG_OFFS_TC, MPU6050_TC_OFFSET_BIT, MPU6050_TC_OFFSET_LENGTH, xgOffsetTC);
+            writeBits(devAddr, MPU6050_RA_YG_OFFS_TC, MPU6050_TC_OFFSET_BIT, MPU6050_TC_OFFSET_LENGTH, ygOffsetTC);
+            writeBits(devAddr, MPU6050_RA_ZG_OFFS_TC, MPU6050_TC_OFFSET_BIT, MPU6050_TC_OFFSET_LENGTH, zgOffsetTC);
+            //Writing final memory update 1/7 (function unknown)
+            uint8_t dmpUpdate[16], j;
+            uint16_t pos = 0;
+            for (j = 0; j < 4 || j < dmpUpdate[2] + 3; j++, pos++) dmpUpdate[j] = pgm_read_byte(&dmpUpdates[pos]);
+            writeMemoryBlock(devAddr, dmpUpdate + 3, dmpUpdate[2], dmpUpdate[0], dmpUpdate[1],1,0);
+            //Writing final memory update 2/7 (function unknown)
+            for (j = 0; j < 4 || j < dmpUpdate[2] + 3; j++, pos++) dmpUpdate[j] = pgm_read_byte(&dmpUpdates[pos]);
+            writeMemoryBlock(devAddr, dmpUpdate + 3, dmpUpdate[2], dmpUpdate[0], dmpUpdate[1],1,0);
+            
+            writeBit(devAddr, MPU6050_RA_USER_CTRL, MPU6050_USERCTRL_FIFO_RESET_BIT, 1); //reset FIFO
+            uint16_t fifoCount = getFIFOCount(devAddr);// get Current FIFO count
+            uint8_t fifoBuffer[128];
+            getFIFOBytes(devAddr,fifoBuffer, fifoCount);//Reading FIFO data
+            
+            writeByte(devAddr, MPU6050_RA_MOT_THR, 2);//Setting motion detection threshold to 2.
+            writeByte(devAddr, MPU6050_RA_ZRMOT_THR, 156);//Setting zero-motion detection threshold to 156
+            writeByte(devAddr, MPU6050_RA_MOT_DUR, 80);//Setting motion detection duration to 80
+            writeByte(devAddr, MPU6050_RA_ZRMOT_DUR, 0);//Setting zero-motion detection duration to 0
+            
+            writeBit(devAddr, MPU6050_RA_USER_CTRL, MPU6050_USERCTRL_FIFO_RESET_BIT, 1); //resetFIFO
+            writeBit(devAddr, MPU6050_RA_USER_CTRL, MPU6050_USERCTRL_FIFO_EN_BIT, 1); //FIFO enable
+            writeBit(devAddr, MPU6050_RA_USER_CTRL, MPU6050_USERCTRL_DMP_EN_BIT, 1); //DMP enable
+            writeBit(devAddr, MPU6050_RA_USER_CTRL, MPU6050_USERCTRL_DMP_RESET_BIT, 1); //reset DMP
+            
+            //Writing final memory update 3/7 (function unknown)
+            for (j = 0; j < 4 || j < dmpUpdate[2] + 3; j++, pos++) dmpUpdate[j] = pgm_read_byte(&dmpUpdates[pos]);
+            writeMemoryBlock(devAddr, dmpUpdate + 3, dmpUpdate[2], dmpUpdate[0], dmpUpdate[1],1,0);
+            //Writing final memory update 4/7 (function unknown)
+            for (j = 0; j < 4 || j < dmpUpdate[2] + 3; j++, pos++) dmpUpdate[j] = pgm_read_byte(&dmpUpdates[pos]);
+            writeMemoryBlock(devAddr, dmpUpdate + 3, dmpUpdate[2], dmpUpdate[0], dmpUpdate[1],1,0);
+            //Writing final memory update 5/7 (function unknown)
+            for (j = 0; j < 4 || j < dmpUpdate[2] + 3; j++, pos++) dmpUpdate[j] = pgm_read_byte(&dmpUpdates[pos]);
+            writeMemoryBlock(devAddr, dmpUpdate + 3, dmpUpdate[2], dmpUpdate[0], dmpUpdate[1],1,0);
+            
+            while ((fifoCount = getFIFOCount(devAddr)) < 3); //Waiting for FIFO count > 2
+            getFIFOBytes(devAddr,fifoBuffer, fifoCount);//Reading FIFO data
+            
+            
+            //Reading final memory update 6/7 (function unknown)
+            for (j = 0; j < 4 || j < dmpUpdate[2] + 3; j++, pos++) dmpUpdate[j] = pgm_read_byte(&dmpUpdates[pos]);
+            readMemoryBlock(devAddr, dmpUpdate + 3, dmpUpdate[2], dmpUpdate[0], dmpUpdate[1]);
+            
+            while ((fifoCount = getFIFOCount(devAddr)) < 3);//Waiting for FIFO count > 2
+            getFIFOBytes(devAddr,fifoBuffer, fifoCount);//Reading FIFO data.
+            //Writing final memory update 7/7 (function unknown)
+            for (j = 0; j < 4 || j < dmpUpdate[2] + 3; j++, pos++) dmpUpdate[j] = pgm_read_byte(&dmpUpdates[pos]);
+            writeMemoryBlock(devAddr, dmpUpdate + 3, dmpUpdate[2], dmpUpdate[0], dmpUpdate[1],1,0);
+            
+            writeBit(devAddr, MPU6050_RA_USER_CTRL, MPU6050_USERCTRL_DMP_EN_BIT, 0);//Disabling DMP (you turn it on later)
+            
+            dmpPacketSize = 42;
+            writeBit(devAddr, MPU6050_RA_USER_CTRL, MPU6050_USERCTRL_FIFO_RESET_BIT, 1); //reset FIFO
+            
+            getIntStatus(devAddr);
+            
+        }else {
+            return 2; // configuration block loading failed
+        }
+        
+    }else {
+        return 1; // main binary block loading failed
+    }
+     return 0; // success
+}
+
+uint16_t dmpGetFIFOPacketSize() {
+    return dmpPacketSize;
+}
+uint8_t dmpGetQuaternion(float *q, const uint8_t* packet) {
+    // TODO: accommodate different arrangements of sent data (ONLY default supported now)
+    int16_t qI[4];
+//    q[0] = (((uint32_t)packet[0] << 24) | ((uint32_t)packet[1] << 16) | ((uint32_t)packet[2] << 8) | packet[3]);
+//    q[1] = (((uint32_t)packet[4] << 24) | ((uint32_t)packet[5] << 16) | ((uint32_t)packet[6] << 8) | packet[7]);
+//    q[2] = (((uint32_t)packet[8] << 24) | ((uint32_t)packet[9] << 16) | ((uint32_t)packet[10] << 8) | packet[11]);
+//    q[3] = (((uint32_t)packet[12] << 24) | ((uint32_t)packet[13] << 16) | ((uint32_t)packet[14] << 8) | packet[15]);
+    qI[0] = ((packet[0] << 8) | packet[1]);
+    qI[1] = ((packet[4] << 8) | packet[5]);
+    qI[2] = ((packet[8] << 8) | packet[9]);
+    qI[3] = ((packet[12] << 8) | packet[13]);
+    q[0] = (float)qI[0] / 16384.0f;
+    q[1] = (float)qI[1] / 16384.0f;
+    q[2] = (float)qI[2] / 16384.0f;
+    q[3] = (float)qI[3] / 16384.0f;
+    return 0;
+
+}
+uint8_t dmpGetGravity(float *v, float *q) {
+    v[0] = 2 * (q[1]*q[3] - q[0]*q[2]);
+    v[1] = 2 * (q[0]*q[1] + q[2]*q[3]);
+    v[2] = q[0]*q[0] - q[1]*q[1] - q[2]*q[2] + q[3]*q[3];
+    return 0;
+}
+uint8_t dmpGetYawPitchRoll(float *ypr, float *q, float *gravity) {
+    // yaw: (about Z axis)
+    ypr[0] = atan2(2*q[1]*q[2] - 2*q[0]*q[3], 2*q[0]*q[0] + 2*q[1]*q[1] - 1);
+    // pitch: (nose up/down, about Y axis)
+    ypr[1] = atan2(gravity[0] , sqrt(gravity[1]*gravity[1] + gravity[2]*gravity[2]));
+    // roll: (tilt left/right, about X axis)
+    ypr[2] = atan2(gravity [1] , gravity [2]);
+    if (gravity[2] < 0) {
+        if(ypr[1] > 0) {
+            ypr[1] = 3.14152f - ypr[1]; 
+        } else { 
+            ypr[1] = -3.14152f - ypr[1];
+        }
+    }
+    return 0;
+}
+uint8_t dmpGetAccel(float *v, const uint8_t* packet) {
+
+    v[0] = (packet[28] << 8) | packet[29];
+    v[1] = (packet[32] << 8) | packet[33];
+    v[2] = (packet[36] << 8) | packet[37];
+    return 0;
+}
+void getproduct(float *p,float *q,float *product){
+    //this is q*p
+    product[0] = q[0]*p[0] - q[1]*p[1] - q[2]*p[2] - q[3]*p[3];
+    product[1] = q[0]*p[1] + q[1]*p[0] + q[2]*p[3] - q[3]*p[2];
+    product[2] = q[0]*p[2] - q[1]*p[3] - q[2]*p[0] - q[3]*p[1];
+    product[3] = q[0]*p[3] + q[1]*p[2] + q[2]*p[1] - q[3]*p[0];
+}
+uint8_t dmpGetLinearAccel(float* v, float * vRaw, float * gravity){
+    v[0] = vRaw[0] - gravity[0]*8192;
+    v[1] = vRaw[1] - gravity[1]*8192;
+    v[2] = vRaw[2] - gravity[2]*8192;
+    return 0; 
+}
+uint8_t dmpGetLinearAccelInWorld(float *v, float *vReal, float *q) {
+    // rotate measured 3D acceleration vector into original state
+    // frame of reference based on orientation quaternion
+    memcpy(v, vReal, 6);
+    // v.rotate(q);
+    float p[4]; float w,x,y,z;
+    w=0;x=v[0];y=v[1];z=v[2];
+    p[0]=w;p[1]=x;p[2]=y;p[3]=z;
+    // quaternion multiplication: q * p, stored back in p
+    w = q[0]*p[0] - q[1]*p[1] - q[2]*p[2] - q[3]*p[3];
+    x = q[0]*p[1] + q[1]*p[0] + q[2]*p[3] - q[3]*p[2];
+    y = q[0]*p[2] - q[1]*p[3] - q[2]*p[0] - q[3]*p[1];
+    z = q[0]*p[3] + q[1]*p[2] + q[2]*p[1] - q[3]*p[0];
+    p[0]=w;p[1]=x;p[2]=y;p[3]=z;
+    // quaternion multiplication: p * conj(q), stored back in p
+    float w_,x_,y_,z_;
+    w_=q[0];x_=-q[1];y_=-q[2];z_=-q[3];
+    float q_[4];
+    q_[0]=w_;q_[1]=x_;q_[2]=y_;q_[3]=z_;
+    w = p[0]*q_[0] - p[1]*q_[1] - p[2]*q_[2] - p[3]*q_[3];
+    x = p[0]*q_[1] + p[1]*q_[0] + p[2]*q_[3] - p[3]*q_[2];
+    y = p[0]*q_[2] - p[1]*q_[3] - p[2]*q_[0] - p[3]*q_[1];
+    z = p[0]*q_[3] + p[1]*q_[2] + p[2]*q_[1] - p[3]*q_[0];
+    p[0]=w;p[1]=x;p[2]=y;p[3]=z;
+    v[0]=p[1];
+    v[1]=p[2];
+    v[2]=p[3];
+    return 0;
+}
+uint8_t dmpGetGyro(int16_t *v, const uint8_t* packet) {
+
+    v[0] = (packet[16] << 8) | packet[17];
+    v[1] = (packet[20] << 8) | packet[21];
+    v[2] = (packet[24] << 8) | packet[25];
+    return 0;
+}
 
 #endif /* _MPU6050_6AXIS_MOTIONAPPS20_H_ */
